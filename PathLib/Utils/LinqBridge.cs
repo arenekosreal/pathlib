@@ -35,13 +35,6 @@ using System.Diagnostics;
 
 #pragma warning disable 1591
 
-namespace System.Runtime.CompilerServices
-{
-    [AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class
-         | AttributeTargets.Method)]
-    public sealed class ExtensionAttribute : Attribute { }
-}
-
 namespace PathLib.Utils
 {
     /// <summary>
