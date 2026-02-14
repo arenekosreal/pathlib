@@ -39,6 +39,25 @@ public class PosixPathTests : IClassFixture<PosixPathTestsFixture>
 {
     private readonly PosixPathTestsFixture _fixture;
 
+    private static async Task<string> RunStatAsync(params string[] arguments)
+    {
+        using (var process = new Process())
+        {
+            process.StartInfo.FileName = "stat";
+            process.StartInfo.Arguments = string.Join(" ", arguments);
+            process.StartInfo.UseShellExecute = false;
+            process.StartInfo.RedirectStandardOutput = true;
+
+            process.Start();
+            await process.WaitForExitAsync();
+            Assert.Equal(0, process.ExitCode);
+            return await process.StandardOutput.ReadToEndAsync();
+        }
+    }
+
+    private static DateTimeOffset FromUnixTimeNanoseconds(Int64 nanoseconds) =>
+        new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero).AddTicks(nanoseconds / 100);
+
     public PosixPathTests(PosixPathTestsFixture fixture)
     {
         _fixture = fixture;
@@ -62,48 +81,33 @@ public class PosixPathTests : IClassFixture<PosixPathTestsFixture>
         var path = Path.Combine(_fixture.TempFolder, fname);
         await File.WriteAllTextAsync(path, contents);
 
-        using(var process = new Process())
-        {
-            process.StartInfo.FileName = "stat";
-            process.StartInfo.Arguments = path;
-            process.StartInfo.UseShellExecute = false;
-            process.StartInfo.RedirectStandardOutput = true;
-            process.Start();
+        var st_dev = await RunStatAsync("--printf=%d", path);
+        var st_ino = await RunStatAsync("--printf=%i", path);
+        var st_mode = await RunStatAsync("--printf=%04a", path);
+        var st_nlink = await RunStatAsync("--printf=%h", path);
+        var st_uid = await RunStatAsync("--printf=%u", path);
+        var st_gid = await RunStatAsync("--printf=%g", path);
+        var st_size = await RunStatAsync("--printf=%s", path);
+        var st_atim = FromUnixTimeNanoseconds(long.Parse((await RunStatAsync("--printf=%.9X", path)).Replace(".", string.Empty)))
+                     .LocalDateTime.ToUniversalTime();
+        var st_mtim = FromUnixTimeNanoseconds(long.Parse((await RunStatAsync("--printf=%.9Y", path)).Replace(".", string.Empty)))
+                     .LocalDateTime.ToUniversalTime();
+        var st_ctim = FromUnixTimeNanoseconds(long.Parse((await RunStatAsync("--printf=%.9W", path)).Replace(".", string.Empty)))
+                     .LocalDateTime.ToUniversalTime();
 
-            var output = await process.StandardOutput.ReadToEndAsync();
-            await process.WaitForExitAsync();
-            Assert.Equal(0, process.ExitCode);
+        var info = new PosixPath(path).Stat();
 
-            var st_dev = Regex.Match(output, @"Device:\s\w+/(\d+)d").Groups[1].Value;
-            var st_ino = Regex.Match(output, @"Inode:\s(\d+)").Groups[1].Value;
-            var st_mode = Regex.Match(output, @"Access:\s\((\d+)").Groups[1].Value;
-            var st_nlink = Regex.Match(output, @"Links:\s(\d+)").Groups[1].Value;
-            var st_uid = Regex.Match(output, @"Uid:\s\(\s(\d+)").Groups[1].Value;
-            var st_gid = Regex.Match(output, @"Gid:\s\(\s(\d+)").Groups[1].Value;
-            var st_size = Regex.Match(output, @"Size:\s(\d+)").Groups[1].Value;
-            var st_atim_match = Regex.Match(output, @"Access:\s([\w: -]+\.\d{7})\d{2} (-\d{2})");
-            var st_atim = DateTime.ParseExact(st_atim_match.Groups[1].Value + " " + st_atim_match.Groups[2].Value,
-                "yyyy-MM-dd HH:mm:ss.FFFFFFF zz", CultureInfo.InvariantCulture).ToUniversalTime();
-            var st_mtim_match = Regex.Match(output, @"Modify:\s([\w: -]+\.\d{7})\d{2} (-\d{2})");
-            var st_mtim = DateTime.ParseExact(st_mtim_match.Groups[1].Value + " " + st_mtim_match.Groups[2].Value,
-                "yyyy-MM-dd HH:mm:ss.FFFFFFF zz", CultureInfo.InvariantCulture).ToUniversalTime();
-            var st_ctim_match = Regex.Match(output, @"Birth:\s([\w: -]+\.\d{7})\d{2} (-\d{2})");
-            var st_ctim = DateTime.ParseExact(st_ctim_match.Groups[1].Value + " " + st_ctim_match.Groups[2].Value,
-                "yyyy-MM-dd HH:mm:ss.FFFFFFF zz", CultureInfo.InvariantCulture).ToUniversalTime();
-
-            var info = new PosixPath(path).Stat();
-
-            Assert.Equal(st_dev, info.Device.ToString());
-            Assert.Equal(st_ino, info.Inode.ToString());
-            Assert.Equal(st_mode, info.Mode);
-            Assert.Equal(st_nlink, info.NumLinks.ToString());
-            Assert.Equal(st_uid, info.Uid.ToString());
-            Assert.Equal(st_gid, info.Gid.ToString());
-            Assert.Equal(st_size, info.Size.ToString());
-            Assert.Equal(st_atim, info.ATime);
-            Assert.Equal(st_mtim, info.MTime);
-            Assert.Equal(st_ctim, info.CTime);
-        }
+        Assert.Equal(st_dev, info.Device.ToString());
+        Assert.Equal(st_ino, info.Inode.ToString());
+        Assert.Equal(st_mode, info.Mode);
+        Assert.Equal(st_nlink, info.NumLinks.ToString());
+        Assert.Equal(st_uid, info.Uid.ToString());
+        Assert.Equal(st_gid, info.Gid.ToString());
+        Assert.Equal(st_size, info.Size.ToString());
+        // C# only has 100 nanoseconds' resolution.
+        Assert.True((st_atim - info.ATime).TotalMilliseconds <= 1e-4);
+        Assert.True((st_mtim - info.MTime).TotalMilliseconds <= 1e-4);
+        Assert.True((st_ctim - info.CTime).TotalMilliseconds <= 1e-4);
     }
 
     [Fact]
@@ -217,7 +221,7 @@ public class PosixPathTests : IClassFixture<PosixPathTestsFixture>
         Assert.Equal(PathLib.Posix.FileType.Fifo, fileType);
     }
 
-    [DllImport("libc", SetLastError = true, CharSet = CharSet.Auto, CallingConvention=CallingConvention.Cdecl)]
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Auto, CallingConvention = CallingConvention.Cdecl)]
     private static extern int mkfifo(string path, uint mode);
 
     [Fact]
